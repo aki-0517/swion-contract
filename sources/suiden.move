@@ -86,8 +86,8 @@ module suiden::nft_system {
     // Entry Functions
     /////////////////////////////////
 
-    /// 新規ウォータータンクSBTの初期化
-    /// - `background_image`: 背景画像のURIをバイトベクター（例："https://example.com/bg.png"）として受け取る
+    /// 新規ウォータータンクSBTの初期化  
+    /// - `background_image`: 背景画像のURIをバイトベクター（例："https://example.com/bg.png"）として受け取る  
     /// - `level`: 初期レベル
     public entry fun initialize_tank(
         owner: address,
@@ -130,7 +130,7 @@ module suiden::nft_system {
         });
     }
 
-    /// ウォータータンクに NFTObject を添付する
+    /// ウォータータンクに NFTObject を添付する  
     /// NFTObject は mutable reference で受け取ることで、値の move を避けます
     public entry fun attach_object(
         tank: &mut WaterTank,
@@ -148,9 +148,9 @@ module suiden::nft_system {
         });
     }
 
-    /// 個々の NFTObject の mint
-    /// - `name`: NFT の名称（バイトベクター）
-    /// - `image`: 画像 URI（バイトベクター）
+    /// 個々の NFTObject の mint  
+    /// - `name`: NFT の名称（バイトベクター）  
+    /// - `image`: 画像 URI（バイトベクター）  
     /// - `mint_flag`: mint 条件等の情報（シリアライズ済みバイトベクター）
     public entry fun mint_nft_object(
         name: vector<u8>,
@@ -181,9 +181,9 @@ module suiden::nft_system {
         transfer::public_transfer(nft, owner);
     }
 
-    /// 複数の NFTObject を連携して SynObject を mint する
-    /// - `attached_objects`: 連携対象の NFTObject の ID 一覧
-    /// - `image`: SynObject 用画像 URI（バイトベクター）
+    /// 複数の NFTObject を連携して SynObject を mint する  
+    /// - `attached_objects`: 連携対象の NFTObject の ID 一覧  
+    /// - `image`: SynObject 用画像 URI（バイトベクター）  
     /// - `mint_flags`: 連携対象各 NFT の mint_flag 情報（各バイトベクターのリスト）
     public entry fun mint_syn_object(
         attached_objects: vector<ID>,
@@ -229,5 +229,70 @@ module suiden::nft_system {
 
     public fun syn_object_is_public(syn: &SynObject): bool {
         syn.is_public
+    }
+}
+
+#[test_only]
+module suiden::nft_systemTests {
+    use suiden::nft_system::{
+        WaterTank, NFTObject, initialize_tank, mint_nft_object,
+        attach_object, update_object_position
+    };
+    use sui::test_scenario as ts;
+    use sui::transfer;
+    use std::string;
+
+    #[test]
+    fun test_tank_nft_workflow() {
+        let addr1 = @0xA;
+        // addr1 を作成者としてシナリオ開始
+        let scenario = ts::begin(addr1);
+        {
+            // 1. ウォータータンクの初期化
+            initialize_tank(
+                addr1,
+                b"https://example.com/bg.png",
+                1,
+                ts::ctx(&mut scenario)
+            );
+        };
+        
+        // トランザクションを完了させる
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 送信先アドレス (addr1) の在庫から取得
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+
+            // 2. NFTObject の mint
+            mint_nft_object(
+                b"TestNFT",
+                b"https://example.com/nft.png",
+                b"flag",
+                ts::ctx(&mut scenario)
+            );
+            
+            // タンクをアドレスに戻す
+            ts::return_to_address(addr1, tank);
+        };
+        
+        // 次のトランザクションに移行
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 送信先アドレス (addr1) の在庫からタンクと NFT を取得
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let nft = ts::take_from_address<NFTObject>(&scenario, addr1);
+
+            // 3. NFTObject をウォータータンクに添付
+            attach_object(&mut tank, &mut nft, ts::ctx(&mut scenario));
+
+            // 4. NFTObject の位置を更新（例：x=100, y=200）
+            update_object_position(&tank, &mut nft, 100, 200, ts::ctx(&mut scenario));
+
+            // 5. 各リソースを送信者に返却
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, nft);
+        };
+
+        ts::end(scenario);
     }
 }
