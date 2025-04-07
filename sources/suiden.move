@@ -30,8 +30,6 @@ module suiden::nft_system {
         owner: address,
         image: url::Url,
         name: string::String,
-        // mint_flag はシリアライズされた情報をバイトベクターで保持
-        mint_flag: vector<u8>,
         // NFTObject の配置情報: x軸と y軸
         position_x: u64,
         position_y: u64
@@ -45,8 +43,6 @@ module suiden::nft_system {
         // 連携する NFTObject の ID 一覧
         attached_objects: vector<ID>,
         image: url::Url,
-        // 各 NFT Object の mint_flag 情報（バイトベクターのリスト）
-        mint_flags: vector<vector<u8>>,
         // 公開状態
         is_public: bool
     }
@@ -80,6 +76,17 @@ module suiden::nft_system {
     struct MintSynObjectEvent has copy, drop {
         syn_id: ID,
         creator: address
+    }
+
+    // 追加: 背景画像とレベル更新イベント
+    struct UpdateTankBackgroundEvent has copy, drop {
+        tank_id: ID,
+        new_background: url::Url
+    }
+
+    struct UpdateTankLevelEvent has copy, drop {
+        tank_id: ID,
+        new_level: u64
     }
 
     /////////////////////////////////
@@ -151,11 +158,9 @@ module suiden::nft_system {
     /// 個々の NFTObject の mint  
     /// - `name`: NFT の名称（バイトベクター）  
     /// - `image`: 画像 URI（バイトベクター）  
-    /// - `mint_flag`: mint 条件等の情報（シリアライズ済みバイトベクター）
     public entry fun mint_nft_object(
         name: vector<u8>,
         image: vector<u8>,
-        mint_flag: vector<u8>,
         ctx: &mut TxContext
     ) {
         let nft_name = string::utf8(name);
@@ -165,7 +170,6 @@ module suiden::nft_system {
             owner: sui::tx_context::sender(ctx),
             image: nft_image,
             name: nft_name,
-            mint_flag: mint_flag,
             position_x: 0,
             position_y: 0
         };
@@ -184,11 +188,9 @@ module suiden::nft_system {
     /// 複数の NFTObject を連携して SynObject を mint する  
     /// - `attached_objects`: 連携対象の NFTObject の ID 一覧  
     /// - `image`: SynObject 用画像 URI（バイトベクター）  
-    /// - `mint_flags`: 連携対象各 NFT の mint_flag 情報（各バイトベクターのリスト）
     public entry fun mint_syn_object(
         attached_objects: vector<ID>,
         image: vector<u8>,
-        mint_flags: vector<vector<u8>>,
         ctx: &mut TxContext
     ) {
         let syn_image = url::new_unsafe_from_bytes(image);
@@ -197,7 +199,6 @@ module suiden::nft_system {
             owner: sui::tx_context::sender(ctx),
             attached_objects: attached_objects,
             image: syn_image,
-            mint_flags: mint_flags,
             is_public: false
         };
         event::emit(MintSynObjectEvent {
@@ -215,20 +216,101 @@ module suiden::nft_system {
         syn.is_public = true;
     }
 
+    /// 追加: SBTの背景画像を更新する
+    public entry fun update_tank_background(
+        tank: &mut WaterTank,
+        new_background: vector<u8>,
+        ctx: &mut TxContext
+    ) {
+        let sender = sui::tx_context::sender(ctx);
+        // タンクのオーナーのみが更新可能
+        assert!(sender == tank.owner, 3);
+        
+        let bg_url = url::new_unsafe_from_bytes(new_background);
+        tank.background_image = bg_url;
+        
+        event::emit(UpdateTankBackgroundEvent {
+            tank_id: sui::object::uid_to_inner(&tank.id),
+            new_background: bg_url
+        });
+    }
+
+    /// 追加: SBTのレベルを更新する
+    public entry fun update_tank_level(
+        tank: &mut WaterTank,
+        new_level: u64,
+        ctx: &mut TxContext
+    ) {
+        let sender = sui::tx_context::sender(ctx);
+        // タンクのオーナーのみが更新可能
+        assert!(sender == tank.owner, 4);
+        
+        tank.level = new_level;
+        
+        event::emit(UpdateTankLevelEvent {
+            tank_id: sui::object::uid_to_inner(&tank.id),
+            new_level: new_level
+        });
+    }
+
     /////////////////////////////////
     // Getter Functions
     /////////////////////////////////
 
+
+    /// 追加: SBTの子オブジェクトIDリストを取得する
+    public fun get_tank_child_objects(tank: &WaterTank): &vector<ID> {
+        &tank.child_objects
+    }
+
+    /// 追加: SBTの背景画像URLを取得する
+    public fun get_tank_background(tank: &WaterTank): &url::Url {
+        &tank.background_image
+    }
+
+    /// 追加: SBTのレベルを取得する
+    public fun get_tank_level(tank: &WaterTank): u64 {
+        tank.level
+    }
+
+    /// 追加: NFTオブジェクトの位置を取得する
+    public fun get_nft_position(nft: &NFTObject): (u64, u64) {
+        (nft.position_x, nft.position_y)
+    }
+
+    /// 追加: NFTオブジェクトの画像URLを取得する
+    public fun get_nft_image(nft: &NFTObject): &url::Url {
+        &nft.image
+    }
+
+    /// 追加: NFTオブジェクトの所有者を取得する
+    public fun get_nft_owner(nft: &NFTObject): address {
+        nft.owner
+    }
+
+    /// 追加: SynObjectの連携されたオブジェクトIDリストを取得する
+    public fun get_syn_attached_objects(syn: &SynObject): &vector<ID> {
+        &syn.attached_objects
+    }
+
+    /// 追加: SynObjectの所有者を取得する
+    public fun get_syn_owner(syn: &SynObject): address {
+        syn.owner
+    }
+
+    /// 追加: SynObjectの画像URLを取得する
+    public fun get_syn_image(syn: &SynObject): &url::Url {
+        &syn.image
+    }
+
+    /// 追加: WaterTankのIDを取得する
+    public fun get_tank_id(tank: &WaterTank): ID {
+        sui::object::uid_to_inner(&tank.id)
+    }
+
+    /// 追加: WaterTankの所有者を取得する
     public fun get_tank_owner(tank: &WaterTank): address {
         tank.owner
-    }
-
-    public fun get_nft_name(nft: &NFTObject): &string::String {
-        &nft.name
-    }
-
-    public fun syn_object_is_public(syn: &SynObject): bool {
-        syn.is_public
     }
 }
 
@@ -236,7 +318,8 @@ module suiden::nft_system {
 module suiden::nft_systemTests {
     use suiden::nft_system::{
         WaterTank, NFTObject, initialize_tank, mint_nft_object,
-        attach_object, update_object_position
+        attach_object, update_object_position, update_tank_background,
+        update_tank_level
     };
     use sui::test_scenario as ts;
     use sui::transfer;
@@ -267,7 +350,6 @@ module suiden::nft_systemTests {
             mint_nft_object(
                 b"TestNFT",
                 b"https://example.com/nft.png",
-                b"flag",
                 ts::ctx(&mut scenario)
             );
             
@@ -287,6 +369,10 @@ module suiden::nft_systemTests {
 
             // 4. NFTObject の位置を更新（例：x=100, y=200）
             update_object_position(&tank, &mut nft, 100, 200, ts::ctx(&mut scenario));
+
+            // 新機能テスト: 背景とレベルの更新
+            update_tank_background(&mut tank, b"https://example.com/new_bg.png", ts::ctx(&mut scenario));
+            update_tank_level(&mut tank, 2, ts::ctx(&mut scenario));
 
             // 5. 各リソースを送信者に返却
             ts::return_to_address(addr1, tank);
