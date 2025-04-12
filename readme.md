@@ -1,4 +1,4 @@
-# SUIDEN contract
+# SWION contract
 
 Transaction Digest: 4LPW7RdN6QUL4rvXPs9MoQ6s8fsZiCE6CMUpcx7Zh49M
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────╮

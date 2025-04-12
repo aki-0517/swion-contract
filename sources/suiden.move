@@ -1,4 +1,4 @@
-module suiden::nft_system {
+module swion::nft_system {
     use sui::object::{Self, ID, UID};
     use sui::tx_context::{Self, TxContext};
     use sui::transfer;
@@ -6,12 +6,18 @@ module suiden::nft_system {
     use sui::url::{Self, Url};
     use std::string::{Self, String};
     use std::vector;
-    use sui::dynamic_object_field as dof;
-    use sui::table::{Self, Table};
+    use sui::display::{Self, Display}; // Added display import
+    use sui::package::{Self, Publisher}; // Added package import
+    use sui::hex; // Added hex import for address encoding
+    use sui::bcs; // Added bcs import for address conversion
+    use std::option::{Self, Option}; // 追加: Optionタイプのために必要
 
     /////////////////////////////////
     // Structures
     /////////////////////////////////
+
+    /// OTW (One Time Witness) for display initialization
+    struct NFT_SYSTEM has drop {}
 
     /// ウォータータンクSBTの構造体
     struct WaterTank has key, store {
@@ -22,7 +28,10 @@ module suiden::nft_system {
         // 背景画像URI（walrus保存用）
         background_image: Url,
         // 現在のレベル
-        level: u64
+        level: u64,
+        // Hex-encoded ID for Walrus site references
+        hexaddr: String,
+        custom_walrus_site: Option<address> // 新しいフィールド
     }
 
     /// NFT情報を格納する構造体（取得用）
@@ -105,6 +114,58 @@ module suiden::nft_system {
     }
 
     /////////////////////////////////
+    // Module Initialization
+    /////////////////////////////////
+
+    /// Module initialization function - sets up the Display for WaterTank objects
+    fun init(otw: NFT_SYSTEM, ctx: &mut TxContext) {
+        let publisher = package::claim(otw, ctx);
+        let display = display::new<WaterTank>(&publisher, ctx);
+
+        display::add(&mut display, 
+            string::utf8(b"name"), 
+            string::utf8(b"Swion Water Tank")
+        );
+        display::add(&mut display, 
+            string::utf8(b"description"), 
+            string::utf8(b"A virtual water tank where you can place your aquatic objects")
+        );
+        display::add(&mut display, 
+            string::utf8(b"link"), 
+            string::utf8(b"https://swion.wal.app/0x{hexaddr}")
+        );
+        
+        display::add(&mut display, 
+            string::utf8(b"walrus site address"), 
+            string::utf8(b"dynamic:{hexaddr}")
+        );
+
+        display::update_version(&mut display);
+
+        transfer::public_transfer(publisher, tx_context::sender(ctx));
+        transfer::public_transfer(display, tx_context::sender(ctx));
+    }
+
+    /// Walrus Siteアドレスを設定/更新する関数
+    public entry fun set_custom_walrus_site(
+        tank: &mut WaterTank, 
+        walrus_site_address: address,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(sender == tank.owner, 100);
+        tank.custom_walrus_site = option::some(walrus_site_address);
+    }
+
+    /// カスタムWalrus Siteアドレスを取得する関数
+    public fun get_walrus_site_address(tank: &WaterTank): address {
+        *option::borrow_with_default(
+            &tank.custom_walrus_site, 
+            &tank.owner
+        )
+    }
+
+    /////////////////////////////////
     // Entry Functions
     /////////////////////////////////
 
@@ -117,18 +178,27 @@ module suiden::nft_system {
         level: u64,
         ctx: &mut TxContext
     ) {
+        let id = object::new(ctx);
+        let id_bytes = object::uid_to_bytes(&id);
+        let hex_encoded = hex::encode(id_bytes);
+        let hexaddr = string::utf8(hex_encoded);
         let bg_url = url::new_unsafe_from_bytes(background_image);
+        
         let tank = WaterTank {
-            id: object::new(ctx),
+            id,
             owner,
             child_objects: vector::empty<ID>(),
             background_image: bg_url,
-            level
+            level,
+            hexaddr,
+            custom_walrus_site: option::none()
         };
+        
         event::emit(MintWaterTankEvent {
             tank_id: object::uid_to_inner(&tank.id),
             owner
         });
+        
         transfer::public_transfer(tank, owner);
     }
 
@@ -371,6 +441,11 @@ module suiden::nft_system {
     /// NFT情報からIDを取得
     public fun get_nft_info_id(info: &NFTInfo): ID {
         info.id
+    }
+
+    /// タンクのhexアドレスを取得
+    public fun get_tank_hexaddr(tank: &WaterTank): String {
+        tank.hexaddr
     }
 
     #[allow(unused_use)]
