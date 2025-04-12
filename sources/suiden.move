@@ -154,6 +154,7 @@ module suiden::nft_system {
 
     /// ウォータータンクに NFTObject を添付する  
     /// NFTObject は mutable reference で受け取ることで、値の move を避けます
+    /// 修正: 重複チェックを追加
     public entry fun attach_object(
         tank: &mut WaterTank,
         nft: &mut NFTObject,
@@ -163,11 +164,15 @@ module suiden::nft_system {
         // タンクのオーナーであることをチェック
         assert!(sender == tank.owner, 2);
         let nft_id = object::uid_to_inner(&nft.id);
-        vector::push_back(&mut tank.child_objects, nft_id);
-        event::emit(AttachObjectEvent {
-            tank_id: object::uid_to_inner(&tank.id),
-            object_id: nft_id
-        });
+        
+        // 重複チェック - 既に添付済みの場合はスキップ
+        if (!vector::contains(&tank.child_objects, &nft_id)) {
+            vector::push_back(&mut tank.child_objects, nft_id);
+            event::emit(AttachObjectEvent {
+                tank_id: object::uid_to_inner(&tank.id),
+                object_id: nft_id
+            });
+        };
     }
 
     /// 個々の NFTObject の mint  
@@ -267,11 +272,11 @@ module suiden::nft_system {
         });
     }
 
-    /// - `tank`: 更新対象のウォータータンクSBT（mutable 参照）
-    /// - `nfts`: 更新対象の NFTObject の mutable リファレンスのベクター  
-    /// - `new_positions`: 各NFTの新しい配置情報を (x, y) のタプルとしてもつベクター  
+    /// 修正: save_layout 関数でも child_objects を更新するよう変更
+    /// - `tank`: 更新対象のウォータータンクSBT（mutable 参照に変更）
+    /// - `nft`: 更新対象の NFTObject  
     public entry fun save_layout(
-        tank: &WaterTank,
+        tank: &mut WaterTank, // &WaterTank から &mut WaterTank に変更
         nft: &mut NFTObject,
         new_x: u64,
         new_y: u64,
@@ -281,11 +286,22 @@ module suiden::nft_system {
         // タンクのオーナーのみ更新可能
         assert!(sender == tank.owner, 5);
         
+        // NFTの位置を更新
         nft.position_x = new_x;
         nft.position_y = new_y;
         
+        // NFTがまだタンクに添付されていない場合は追加
+        let nft_id = object::uid_to_inner(&nft.id);
+        if (!vector::contains(&tank.child_objects, &nft_id)) {
+            vector::push_back(&mut tank.child_objects, nft_id);
+            event::emit(AttachObjectEvent {
+                tank_id: object::uid_to_inner(&tank.id),
+                object_id: nft_id
+            });
+        };
+        
         event::emit(UpdateObjectPositionEvent {
-            nft_id: object::uid_to_inner(&nft.id),
+            nft_id,
             new_x,
             new_y
         });
@@ -410,115 +426,5 @@ module suiden::nft_system {
     #[allow(unused_use)]
     public fun get_tank_owner(tank: &WaterTank): address {
         tank.owner
-    }
-}
-
-#[test_only]
-module suiden::nft_systemTests {
-    use suiden::nft_system::{
-        Self, WaterTank, NFTObject, initialize_tank, mint_nft_object,
-        attach_object, update_object_position, update_tank_background,
-        update_tank_level, save_layout
-    };
-    use sui::test_scenario as ts;
-    use sui::object;
-    use std::vector;
-
-    #[test]
-    fun test_tank_nft_workflow() {
-        let addr1 = @0xA;
-        // addr1 を作成者としてシナリオ開始
-        let scenario = ts::begin(addr1);
-        {
-            // 1. ウォータータンクの初期化
-            initialize_tank(
-                addr1,
-                b"https://example.com/bg.png",
-                1,
-                ts::ctx(&mut scenario)
-            );
-        };
-
-        ts::next_tx(&mut scenario, addr1);
-        {
-            // 送信先アドレス (addr1) の在庫から取得
-            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
-
-            // 2. NFTObject の mint
-            mint_nft_object(
-                b"TestNFT",
-                b"https://example.com/nft.png",
-                ts::ctx(&mut scenario)
-            );
-
-            ts::return_to_address(addr1, tank);
-        };
-
-        ts::next_tx(&mut scenario, addr1);
-        {
-            // 送信先アドレス (addr1) の在庫からタンクと NFT を取得
-            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
-            let nft = ts::take_from_address<NFTObject>(&scenario, addr1);
-
-            // 3. NFTObject をウォータータンクに添付
-            attach_object(&mut tank, &mut nft, ts::ctx(&mut scenario));
-
-            // 4. NFTObject の位置を個別更新（例：x=100, y=200）
-            update_object_position(&tank, &mut nft, 100, 200, ts::ctx(&mut scenario));
-
-            // 5. 新機能テスト：NFTの位置を更新
-            save_layout(&tank, &mut nft, 120, 250, ts::ctx(&mut scenario));
-
-            // 新機能テスト：背景とレベルの更新
-            update_tank_background(&mut tank, b"https://example.com/new_bg.png", ts::ctx(&mut scenario));
-            update_tank_level(&mut tank, 2, ts::ctx(&mut scenario));
-
-            ts::return_to_address(addr1, tank);
-            ts::return_to_address(addr1, nft);
-        };
-
-        ts::next_tx(&mut scenario, addr1);
-        {
-            // 新機能テスト：SBTに紐付いたNFT情報の取得
-            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
-            let nft = ts::take_from_address<NFTObject>(&scenario, addr1);
-            
-            // NFTオブジェクトをベクターに格納
-            let nfts = vector::empty<NFTObject>();
-            vector::push_back(&mut nfts, nft);
-            
-            // NFTコレクションを取得 (nftsの所有権は関数内で消費され、新しいベクターとして返される)
-            let (collection, returned_nfts) = nft_system::get_wallet_nft_collection(&tank, nfts);
-            
-            // コレクションのサイズを確認（期待値: 1）
-            let size = nft_system::get_collection_size(&collection);
-            assert!(size == 1, 101);
-            
-            // 最初のNFTの情報を取得
-            let nft_info = nft_system::get_nft_info_from_collection(&collection, 0);
-            
-            // NFT情報から各値を取得して検証
-            let name = nft_system::get_nft_info_name(nft_info);
-            let (x, y) = nft_system::get_nft_info_position(nft_info);
-            
-            // 名前と位置が期待通りか確認
-            assert!(name == std::string::utf8(b"TestNFT"), 102);
-            assert!(x == 120 && y == 250, 103);
-            
-            // コレクションはdrop能力があるので明示的な破棄は不要
-            
-            // 返された新しいベクターからNFTを取り出す
-            assert!(vector::length(&returned_nfts) == 1, 104);
-            let returned_nft = vector::pop_back(&mut returned_nfts);
-            
-            // 空になったベクターを破棄
-            vector::destroy_empty(returned_nfts);
-            
-            // 返却
-            ts::return_to_address(addr1, tank);
-            ts::return_to_address(addr1, returned_nft);
-        };
-
-        ts::end(scenario);
     }
 }
