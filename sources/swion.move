@@ -11,6 +11,11 @@ module swion::nft_system {
     use sui::hex; // Added hex import for address encoding
     use sui::bcs; // Added bcs import for address conversion
     use std::option::{Self, Option}; // 追加: Optionタイプのために必要
+    // Kiosk関連の追加インポート
+    use sui::kiosk::{Self, Kiosk, KioskOwnerCap};
+    use sui::transfer_policy::{Self, TransferPolicy, TransferPolicyCap};
+    use sui::coin::{Self, Coin};
+    use sui::sui::SUI;
 
     /////////////////////////////////
     // Structures
@@ -68,7 +73,13 @@ module swion::nft_system {
         attached_objects: vector<ID>,
         image: Url,
         // 公開状態
-        is_public: bool
+        is_public: bool,
+        // 総供給量の設定 - 追加
+        max_supply: u64,
+        // 現在の発行数 - 追加
+        current_supply: u64,
+        // 販売価格 - 追加
+        price: u64
     }
 
     /////////////////////////////////
@@ -111,6 +122,19 @@ module swion::nft_system {
     struct UpdateTankLevelEvent has copy, drop {
         tank_id: ID,
         new_level: u64
+    }
+
+    // Kioskに関連する新しいイベント
+    struct PlaceSynObjectInKioskEvent has copy, drop {
+        syn_id: ID,
+        kiosk_id: ID,
+        price: u64
+    }
+
+    struct PurchaseSynObjectEvent has copy, drop {
+        syn_id: ID,
+        buyer: address,
+        price: u64
     }
 
     /////////////////////////////////
@@ -276,10 +300,14 @@ module swion::nft_system {
 
     /// 複数の NFTObject を連携して SynObject を mint する  
     /// - `attached_objects`: 連携対象の NFTObject の ID 一覧  
-    /// - `image`: SynObject 用画像 URI（バイトベクター）  
+    /// - `image`: SynObject 用画像 URI（バイトベクター）
+    /// - `max_supply`: 最大供給量  
+    /// - `price`: 販売価格
     public entry fun mint_syn_object(
         attached_objects: vector<ID>,
         image: vector<u8>,
+        max_supply: u64,
+        price: u64,
         ctx: &mut TxContext
     ) {
         let syn_image = url::new_unsafe_from_bytes(image);
@@ -288,13 +316,82 @@ module swion::nft_system {
             owner: tx_context::sender(ctx),
             attached_objects,
             image: syn_image,
-            is_public: false
+            is_public: false,
+            max_supply,
+            current_supply: 1, // 初期発行数は1
+            price
         };
         event::emit(MintSynObjectEvent {
             syn_id: object::uid_to_inner(&syn.id),
             creator: tx_context::sender(ctx)
         });
         transfer::public_transfer(syn, tx_context::sender(ctx));
+    }
+
+    /// SynObjectのTransferPolicyを初期化する関数
+    public entry fun init_syn_object_transfer_policy(
+        publisher: &Publisher,
+        ctx: &mut TxContext
+    ) {
+        let (transfer_policy, cap) = transfer_policy::new<SynObject>(publisher, ctx);
+        // TransferPolicyを共有オブジェクトとして公開
+        transfer::public_share_object(transfer_policy);
+        // TransferPolicyCopはポリシー管理者に送信
+        transfer::public_transfer(cap, tx_context::sender(ctx));
+    }
+
+    /// SynObjectをKioskに配置する関数
+    public entry fun place_syn_object_in_kiosk(
+        kiosk: &mut Kiosk,
+        cap: &KioskOwnerCap,
+        syn: SynObject,
+        policy: &TransferPolicy<SynObject>,
+        ctx: &mut TxContext
+    ) {
+        // オーナーチェック
+        assert!(tx_context::sender(ctx) == syn.owner, 1000);
+        // 供給量チェック
+        assert!(syn.current_supply <= syn.max_supply, 1001);
+        
+        let syn_id = object::uid_to_inner(&syn.id);
+        let price = syn.price;
+        
+        // オブジェクトをキオスクに配置して出品
+        kiosk::place_and_list(kiosk, cap, syn, price);
+        
+        event::emit(PlaceSynObjectInKioskEvent {
+            syn_id,
+            kiosk_id: object::id(kiosk),
+            price
+        });
+    }
+
+    /// SynObjectをKioskから購入する関数
+    public entry fun purchase_syn_object_from_kiosk(
+        kiosk: &mut Kiosk,
+        policy: &TransferPolicy<SynObject>,
+        syn_id: ID,
+        payment: Coin<SUI>,
+        ctx: &mut TxContext
+    ) {
+        // キオスクからの購入処理
+        let (syn, request) = kiosk::purchase<SynObject>(kiosk, syn_id, payment);
+        
+        // 供給量の更新
+        syn.current_supply = syn.current_supply + 1;
+        
+        // TransferPolicyの確認
+        transfer_policy::confirm_request(policy, request);
+        
+        let buyer = tx_context::sender(ctx);
+        event::emit(PurchaseSynObjectEvent {
+            syn_id,
+            buyer,
+            price: syn.price
+        });
+        
+        // 購入者に転送
+        transfer::public_transfer(syn, buyer);
     }
 
     /// SynObject の公開状態を更新する
@@ -491,6 +588,22 @@ module swion::nft_system {
     #[allow(unused_use)]
     public fun get_syn_image(syn: &SynObject): &Url {
         &syn.image
+    }
+
+    // SynObjectの供給量関連の新しいgetter関数
+    #[allow(unused_use)]
+    public fun get_syn_current_supply(syn: &SynObject): u64 {
+        syn.current_supply
+    }
+
+    #[allow(unused_use)]
+    public fun get_syn_max_supply(syn: &SynObject): u64 {
+        syn.max_supply
+    }
+
+    #[allow(unused_use)]
+    public fun get_syn_price(syn: &SynObject): u64 {
+        syn.price
     }
 
     #[allow(unused_use)]
