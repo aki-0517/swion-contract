@@ -16,6 +16,7 @@ module swion::nft_system {
     use sui::transfer_policy::{Self, TransferPolicy, TransferPolicyCap};
     use sui::coin::{Self, Coin};
     use sui::sui::SUI;
+    use sui::table::{Self, Table}; // 追加: Kioskの価格テーブル用
 
     /////////////////////////////////
     // Structures
@@ -23,6 +24,13 @@ module swion::nft_system {
 
     /// OTW (One Time Witness) for display initialization
     struct NFT_SYSTEM has drop {}
+
+    /// Kiosk価格管理のためのオブジェクト
+    struct KioskPriceRegistry has key, store {
+        id: UID,
+        // Kiosk ID -> 価格のマッピング
+        prices: Table<ID, u64>
+    }
 
     /// ウォータータンクSBTの構造体
     struct WaterTank has key, store {
@@ -137,11 +145,23 @@ module swion::nft_system {
         price: u64
     }
 
+    // Kiosk価格に関連する新しいイベント
+    struct SetKioskPriceEvent has copy, drop {
+        kiosk_id: ID,
+        price: u64
+    }
+
+    struct PurchaseKioskEvent has copy, drop {
+        kiosk_id: ID,
+        buyer: address,
+        price: u64
+    }
+
     /////////////////////////////////
     // Module Initialization
     /////////////////////////////////
 
-    /// Module initialization function - sets up the Display for WaterTank objects
+    /// Module initialization function - sets up the Display for WaterTank objects and Kiosk registry
     fun init(otw: NFT_SYSTEM, ctx: &mut TxContext) {
         let publisher = package::claim(otw, ctx);
         let display = display::new<WaterTank>(&publisher, ctx);
@@ -166,8 +186,15 @@ module swion::nft_system {
 
         display::update_version(&mut display);
 
+        // Kiosk価格レジストリの初期化
+        let kiosk_registry = KioskPriceRegistry {
+            id: object::new(ctx),
+            prices: table::new(ctx)
+        };
+        
         transfer::public_transfer(publisher, tx_context::sender(ctx));
         transfer::public_transfer(display, tx_context::sender(ctx));
+        transfer::public_share_object(kiosk_registry);
     }
 
     /// Walrus Siteアドレスを設定/更新する関数
@@ -224,6 +251,73 @@ module swion::nft_system {
         });
         
         transfer::public_transfer(tank, owner);
+    }
+
+    /// Kiosk価格を設定する関数
+    public entry fun set_kiosk_price(
+        registry: &mut KioskPriceRegistry,
+        kiosk: &mut Kiosk,
+        cap: &KioskOwnerCap,
+        price: u64,
+        ctx: &mut TxContext
+    ) {
+        // Kioskのオーナーであることを確認
+        assert!(kiosk::owner(kiosk) == tx_context::sender(ctx), 2000);
+        assert!(kiosk::has_access(kiosk, cap), 2001);
+        
+        let kiosk_id = object::id(kiosk);
+        
+        // 既存の価格エントリを更新または新規作成
+        if (table::contains(&registry.prices, kiosk_id)) {
+            *table::borrow_mut(&mut registry.prices, kiosk_id) = price;
+        } else {
+            table::add(&mut registry.prices, kiosk_id, price);
+        };
+        
+        event::emit(SetKioskPriceEvent {
+            kiosk_id,
+            price
+        });
+    }
+
+    /// Kioskを価格付きで購入する関数
+    public entry fun purchase_kiosk(
+        registry: &mut KioskPriceRegistry,
+        kiosk: &mut Kiosk,
+        cap: KioskOwnerCap,  // 所有権を移転するためvalue型として受け取る
+        payment: &mut Coin<SUI>,
+        ctx: &mut TxContext
+    ) {
+        let kiosk_id = object::id(kiosk);
+        
+        // Kioskに価格が設定されているか確認
+        assert!(table::contains(&registry.prices, kiosk_id), 2002);
+        
+        let price = *table::borrow(&registry.prices, kiosk_id);
+        let payment_amount = coin::value(payment);
+        
+        // 支払い金額が十分かチェック
+        assert!(payment_amount >= price, 2003);
+        
+        // 支払いを処理
+        let owner_payment = coin::split(payment, price, ctx);
+        let seller = kiosk::owner(kiosk);
+        transfer::public_transfer(owner_payment, seller);
+        
+        // 価格テーブルからエントリを削除
+        table::remove(&mut registry.prices, kiosk_id);
+        
+        // KioskのオーナーシップをCAP保持者から購入者に移行
+        kiosk::set_owner(kiosk, &cap, ctx);
+        
+        // 既存のキャップを購入者に移転
+        transfer::public_transfer(cap, tx_context::sender(ctx));
+        
+        event::emit(PurchaseKioskEvent {
+            kiosk_id,
+            buyer: tx_context::sender(ctx),
+            price
+        });
     }
 
     /// ウォータータンク内に添付された NFTObject の位置（x, y）を更新する
@@ -475,6 +569,15 @@ module swion::nft_system {
     }
 
     // Getter Functions
+
+    /// Kioskの価格を取得する
+    public fun get_kiosk_price(registry: &KioskPriceRegistry, kiosk_id: ID): Option<u64> {
+        if (table::contains(&registry.prices, kiosk_id)) {
+            option::some(*table::borrow(&registry.prices, kiosk_id))
+        } else {
+            option::none()
+        }
+    }
 
     /// ウォレットアドレスからSBTに紐付いたNFT Objectの情報を全て取得する
     /// オブジェクトコレクションとして返す
