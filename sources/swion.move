@@ -11,6 +11,13 @@ module swion::nft_system {
     use sui::hex; // Added hex import for address encoding
     use sui::bcs; // Added bcs import for address conversion
     use std::option::{Self, Option}; // 追加: Optionタイプのために必要
+    // Kiosk関連の追加インポート
+    use sui::kiosk::{Self, Kiosk, KioskOwnerCap};
+    use sui::transfer_policy::{Self, TransferPolicy, TransferPolicyCap};
+    use sui::coin::{Self, Coin};
+    use sui::sui::SUI;
+    use sui::table::{Self, Table}; // 追加: Kioskの価格テーブル用
+    use swion::marketplace; // 追加
 
     /////////////////////////////////
     // Structures
@@ -18,6 +25,13 @@ module swion::nft_system {
 
     /// OTW (One Time Witness) for display initialization
     struct NFT_SYSTEM has drop {}
+
+    /// Kiosk価格管理のためのオブジェクト
+    struct KioskPriceRegistry has key, store {
+        id: UID,
+        // Kiosk ID -> 価格のマッピング
+        prices: Table<ID, u64>
+    }
 
     /// ウォータータンクSBTの構造体
     struct WaterTank has key, store {
@@ -68,7 +82,13 @@ module swion::nft_system {
         attached_objects: vector<ID>,
         image: Url,
         // 公開状態
-        is_public: bool
+        is_public: bool,
+        // 総供給量の設定 - 追加
+        max_supply: u64,
+        // 現在の発行数 - 追加
+        current_supply: u64,
+        // 販売価格 - 追加
+        price: u64
     }
 
     /////////////////////////////////
@@ -113,11 +133,24 @@ module swion::nft_system {
         new_level: u64
     }
 
+    // Kioskに関連する新しいイベント
+    struct PlaceSynObjectInKioskEvent has copy, drop {
+        syn_id: ID,
+        kiosk_id: ID,
+        price: u64
+    }
+
+    struct PurchaseSynObjectEvent has copy, drop {
+        syn_id: ID,
+        buyer: address,
+        price: u64
+    }
+
     /////////////////////////////////
     // Module Initialization
     /////////////////////////////////
 
-    /// Module initialization function - sets up the Display for WaterTank objects
+    /// Module initialization function - sets up the Display for WaterTank objects and Kiosk registry
     fun init(otw: NFT_SYSTEM, ctx: &mut TxContext) {
         let publisher = package::claim(otw, ctx);
         let display = display::new<WaterTank>(&publisher, ctx);
@@ -142,8 +175,15 @@ module swion::nft_system {
 
         display::update_version(&mut display);
 
+        // Kiosk価格レジストリの初期化
+        let kiosk_registry = KioskPriceRegistry {
+            id: object::new(ctx),
+            prices: table::new(ctx)
+        };
+        
         transfer::public_transfer(publisher, tx_context::sender(ctx));
         transfer::public_transfer(display, tx_context::sender(ctx));
+        transfer::public_share_object(kiosk_registry);
     }
 
     /// Walrus Siteアドレスを設定/更新する関数
@@ -276,10 +316,14 @@ module swion::nft_system {
 
     /// 複数の NFTObject を連携して SynObject を mint する  
     /// - `attached_objects`: 連携対象の NFTObject の ID 一覧  
-    /// - `image`: SynObject 用画像 URI（バイトベクター）  
+    /// - `image`: SynObject 用画像 URI（バイトベクター）
+    /// - `max_supply`: 最大供給量  
+    /// - `price`: 販売価格
     public entry fun mint_syn_object(
         attached_objects: vector<ID>,
         image: vector<u8>,
+        max_supply: u64,
+        price: u64,
         ctx: &mut TxContext
     ) {
         let syn_image = url::new_unsafe_from_bytes(image);
@@ -288,13 +332,82 @@ module swion::nft_system {
             owner: tx_context::sender(ctx),
             attached_objects,
             image: syn_image,
-            is_public: false
+            is_public: false,
+            max_supply,
+            current_supply: 1, // 初期発行数は1
+            price
         };
         event::emit(MintSynObjectEvent {
             syn_id: object::uid_to_inner(&syn.id),
             creator: tx_context::sender(ctx)
         });
         transfer::public_transfer(syn, tx_context::sender(ctx));
+    }
+
+    /// SynObjectのTransferPolicyを初期化する関数
+    public entry fun init_syn_object_transfer_policy(
+        publisher: &Publisher,
+        ctx: &mut TxContext
+    ) {
+        let (transfer_policy, cap) = transfer_policy::new<SynObject>(publisher, ctx);
+        // TransferPolicyを共有オブジェクトとして公開
+        transfer::public_share_object(transfer_policy);
+        // TransferPolicyCopはポリシー管理者に送信
+        transfer::public_transfer(cap, tx_context::sender(ctx));
+    }
+
+    /// SynObjectをKioskに配置する関数
+    public entry fun place_syn_object_in_kiosk(
+        kiosk: &mut Kiosk,
+        cap: &KioskOwnerCap,
+        syn: SynObject,
+        policy: &TransferPolicy<SynObject>,
+        ctx: &mut TxContext
+    ) {
+        // オーナーチェック
+        assert!(tx_context::sender(ctx) == syn.owner, 1000);
+        // 供給量チェック
+        assert!(syn.current_supply <= syn.max_supply, 1001);
+        
+        let syn_id = object::uid_to_inner(&syn.id);
+        let price = syn.price;
+        
+        // オブジェクトをキオスクに配置して出品
+        kiosk::place_and_list(kiosk, cap, syn, price);
+        
+        event::emit(PlaceSynObjectInKioskEvent {
+            syn_id,
+            kiosk_id: object::id(kiosk),
+            price
+        });
+    }
+
+    /// SynObjectをKioskから購入する関数
+    public entry fun purchase_syn_object_from_kiosk(
+        kiosk: &mut Kiosk,
+        policy: &TransferPolicy<SynObject>,
+        syn_id: ID,
+        payment: Coin<SUI>,
+        ctx: &mut TxContext
+    ) {
+        // キオスクからの購入処理
+        let (syn, request) = kiosk::purchase<SynObject>(kiosk, syn_id, payment);
+        
+        // 供給量の更新
+        syn.current_supply = syn.current_supply + 1;
+        
+        // TransferPolicyの確認
+        transfer_policy::confirm_request(policy, request);
+        
+        let buyer = tx_context::sender(ctx);
+        event::emit(PurchaseSynObjectEvent {
+            syn_id,
+            buyer,
+            price: syn.price
+        });
+        
+        // 購入者に転送
+        transfer::public_transfer(syn, buyer);
     }
 
     /// SynObject の公開状態を更新する
@@ -378,6 +491,15 @@ module swion::nft_system {
     }
 
     // Getter Functions
+
+    /// Kioskの価格を取得する
+    public fun get_kiosk_price(registry: &KioskPriceRegistry, kiosk_id: ID): Option<u64> {
+        if (table::contains(&registry.prices, kiosk_id)) {
+            option::some(*table::borrow(&registry.prices, kiosk_id))
+        } else {
+            option::none()
+        }
+    }
 
     /// ウォレットアドレスからSBTに紐付いたNFT Objectの情報を全て取得する
     /// オブジェクトコレクションとして返す
@@ -493,6 +615,22 @@ module swion::nft_system {
         &syn.image
     }
 
+    // SynObjectの供給量関連の新しいgetter関数
+    #[allow(unused_use)]
+    public fun get_syn_current_supply(syn: &SynObject): u64 {
+        syn.current_supply
+    }
+
+    #[allow(unused_use)]
+    public fun get_syn_max_supply(syn: &SynObject): u64 {
+        syn.max_supply
+    }
+
+    #[allow(unused_use)]
+    public fun get_syn_price(syn: &SynObject): u64 {
+        syn.price
+    }
+
     #[allow(unused_use)]
     public fun get_tank_id(tank: &WaterTank): ID {
         object::uid_to_inner(&tank.id)
@@ -501,5 +639,132 @@ module swion::nft_system {
     #[allow(unused_use)]
     public fun get_tank_owner(tank: &WaterTank): address {
         tank.owner
+    }
+
+    #[test_only]
+    public fun create_test_nft(ctx: &mut TxContext): SynObject {
+        SynObject {
+            id: object::new(ctx),
+            owner: tx_context::sender(ctx),
+            attached_objects: vector::empty(),
+            image: url::new_unsafe_from_bytes(b"https://example.com/test.png"),
+            is_public: false,
+            max_supply: 100,
+            current_supply: 1,
+            price: 1000
+        }
+    }
+}
+
+#[test_only]
+module swion::nft_systemTests {
+    use swion::nft_system::{
+        Self, WaterTank, NFTObject, SynObject,
+        initialize_tank, mint_nft_object,
+        attach_object, update_object_position, update_tank_background,
+        update_tank_level, save_layout
+    };
+    use sui::test_scenario as ts;
+    use sui::object;
+    use std::vector;
+    use sui::tx_context;
+    use sui::url;
+
+    #[test]
+    fun test_tank_nft_workflow() {
+        let addr1 = @0xA;
+        // addr1 を作成者としてシナリオ開始
+        let scenario = ts::begin(addr1);
+        {
+            // 1. ウォータータンクの初期化
+            initialize_tank(
+                addr1,
+                b"https://example.com/bg.png",
+                1,
+                ts::ctx(&mut scenario)
+            );
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 送信先アドレス (addr1) の在庫から取得
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+
+            // 2. NFTObject の mint
+            mint_nft_object(
+                b"TestNFT",
+                b"https://example.com/nft.png",
+                ts::ctx(&mut scenario)
+            );
+
+            ts::return_to_address(addr1, tank);
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 送信先アドレス (addr1) の在庫からタンクと NFT を取得
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let nft = ts::take_from_address<NFTObject>(&scenario, addr1);
+
+            // 3. NFTObject をウォータータンクに添付
+            attach_object(&mut tank, &mut nft, ts::ctx(&mut scenario));
+
+            // 4. NFTObject の位置を個別更新（例：x=100, y=200）
+            update_object_position(&tank, &mut nft, 100, 200, ts::ctx(&mut scenario));
+
+            // 5. 新機能テスト：NFTの位置を更新
+            save_layout(&mut tank, &mut nft, 120, 250, ts::ctx(&mut scenario));
+
+            // 新機能テスト：背景とレベルの更新
+            update_tank_background(&mut tank, b"https://example.com/new_bg.png", ts::ctx(&mut scenario));
+            update_tank_level(&mut tank, 2, ts::ctx(&mut scenario));
+
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, nft);
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 新機能テスト：SBTに紐付いたNFT情報の取得
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let nft = ts::take_from_address<NFTObject>(&scenario, addr1);
+            
+            // NFTオブジェクトをベクターに格納
+            let nfts = vector::empty<NFTObject>();
+            vector::push_back(&mut nfts, nft);
+            
+            // NFTコレクションを取得 (nftsの所有権は関数内で消費され、新しいベクターとして返される)
+            let (collection, returned_nfts) = nft_system::get_wallet_nft_collection(&tank, nfts);
+            
+            // コレクションのサイズを確認（期待値: 1）
+            let size = nft_system::get_collection_size(&collection);
+            assert!(size == 1, 101);
+            
+            // 最初のNFTの情報を取得
+            let nft_info = nft_system::get_nft_info_from_collection(&collection, 0);
+            
+            // NFT情報から各値を取得して検証
+            let name = nft_system::get_nft_info_name(nft_info);
+            let (x, y) = nft_system::get_nft_info_position(nft_info);
+            
+            // 名前と位置が期待通りか確認
+            assert!(name == std::string::utf8(b"TestNFT"), 102);
+            assert!(x == 120 && y == 250, 103);
+            
+            // コレクションはdrop能力があるので明示的な破棄は不要
+            
+            // 返された新しいベクターからNFTを取り出す
+            assert!(vector::length(&returned_nfts) == 1, 104);
+            let returned_nft = vector::pop_back(&mut returned_nfts);
+            
+            // 空になったベクターを破棄
+            vector::destroy_empty(returned_nfts);
+            
+            // 返却
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, returned_nft);
+        };
+
+        ts::end(scenario);
     }
 }
