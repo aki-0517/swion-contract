@@ -83,12 +83,21 @@ module swion::nft_system {
         image: Url,
         // 公開状態
         is_public: bool,
-        // 総供給量の設定 - 追加
+        // 総供給量の設定
         max_supply: u64,
-        // 現在の発行数 - 追加
+        // 現在の発行数
         current_supply: u64,
-        // 販売価格 - 追加
-        price: u64
+        // 販売価格
+        price: u64,
+        // SynObjectの位置情報
+        position_x: u64,
+        position_y: u64
+    }
+
+    /// タンクにSynObjectを添付するイベント
+    struct AttachSynObjectEvent has copy, drop {
+        tank_id: ID,
+        syn_id: ID
     }
 
     /////////////////////////////////
@@ -144,6 +153,13 @@ module swion::nft_system {
         syn_id: ID,
         buyer: address,
         price: u64
+    }
+
+    // SynObjectの位置情報更新用イベント
+    struct UpdateSynPositionEvent has copy, drop {
+        syn_id: ID,
+        new_x: u64,
+        new_y: u64
     }
 
     /////////////////////////////////
@@ -335,7 +351,9 @@ module swion::nft_system {
             is_public: false,
             max_supply,
             current_supply: 1, // 初期発行数は1
-            price
+            price,
+            position_x: 0, // 初期位置は0,0
+            position_y: 0
         };
         event::emit(MintSynObjectEvent {
             syn_id: object::uid_to_inner(&syn.id),
@@ -490,6 +508,27 @@ module swion::nft_system {
         });
     }
 
+    /// ウォータータンクにSynObjectを添付する
+    public entry fun attach_syn_object(
+        tank: &mut WaterTank,
+        syn: &SynObject,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        // タンクのオーナーであることをチェック
+        assert!(sender == tank.owner, 2);
+        let syn_id = object::uid_to_inner(&syn.id);
+        
+        // 重複チェック - 既に添付済みの場合はスキップ
+        if (!vector::contains(&tank.child_objects, &syn_id)) {
+            vector::push_back(&mut tank.child_objects, syn_id);
+            event::emit(AttachSynObjectEvent {
+                tank_id: object::uid_to_inner(&tank.id),
+                syn_id
+            });
+        };
+    }
+
     // Getter Functions
 
     /// Kioskの価格を取得する
@@ -641,6 +680,105 @@ module swion::nft_system {
         tank.owner
     }
 
+    /// SynObjectのコレクション情報
+    struct SynInfo has store, drop, copy {
+        id: ID,
+        image: Url,
+        is_public: bool,
+        max_supply: u64,
+        current_supply: u64,
+        price: u64,
+        // 位置情報を追加
+        position_x: u64,
+        position_y: u64
+    }
+
+    /// SynObjectコレクション
+    struct SynCollection has store, drop {
+        syns: vector<SynInfo>
+    }
+
+    /// ウォレットアドレスからSBTに紐付いたSynObjectの情報を全て取得する
+    public fun get_wallet_syn_collection(
+        tank: &WaterTank,
+        syns: vector<SynObject>
+    ): (SynCollection, vector<SynObject>) {
+        let len = vector::length(&syns);
+        let result = vector::empty<SynInfo>();
+        let remaining_syns = vector::empty<SynObject>();
+        
+        let i = 0;
+        while (i < len) {
+            let syn = vector::pop_back(&mut syns);
+            let syn_id = object::uid_to_inner(&syn.id);
+            
+            if (vector::contains(&tank.child_objects, &syn_id)) {
+                vector::push_back(&mut result, SynInfo {
+                    id: syn_id,
+                    image: syn.image,
+                    is_public: syn.is_public,
+                    max_supply: syn.max_supply,
+                    current_supply: syn.current_supply,
+                    price: syn.price,
+                    position_x: syn.position_x,
+                    position_y: syn.position_y
+                });
+            };
+            
+            vector::push_back(&mut remaining_syns, syn);
+            i = i + 1;
+        };
+
+        vector::destroy_empty(syns);
+        (SynCollection { syns: result }, remaining_syns)
+    }
+
+    /// SynCollectionから個々のSyn情報を取得する
+    public fun get_syn_info_from_collection(collection: &SynCollection, index: u64): &SynInfo {
+        vector::borrow(&collection.syns, index)
+    }
+
+    /// SynCollectionのサイズを取得する
+    public fun get_syn_collection_size(collection: &SynCollection): u64 {
+        vector::length(&collection.syns)
+    }
+
+    /// Syn情報からIDを取得
+    public fun get_syn_info_id(info: &SynInfo): ID {
+        info.id
+    }
+
+    /// Syn情報から画像URLを取得
+    public fun get_syn_info_image(info: &SynInfo): Url {
+        info.image
+    }
+
+    /// Syn情報から公開状態を取得
+    public fun get_syn_info_is_public(info: &SynInfo): bool {
+        info.is_public
+    }
+
+    /// Syn情報から供給量情報を取得
+    public fun get_syn_info_supply(info: &SynInfo): (u64, u64) {
+        (info.current_supply, info.max_supply)
+    }
+
+    /// Syn情報から価格を取得
+    public fun get_syn_info_price(info: &SynInfo): u64 {
+        info.price
+    }
+
+    /// Syn情報から位置情報を取得
+    public fun get_syn_info_position(info: &SynInfo): (u64, u64) {
+        (info.position_x, info.position_y)
+    }
+
+    // テスト用のヘルパー関数
+    #[test_only]
+    public fun get_syn_id(syn: &SynObject): ID {
+        object::uid_to_inner(&syn.id)
+    }
+
     #[test_only]
     public fun create_test_nft(ctx: &mut TxContext): SynObject {
         SynObject {
@@ -651,8 +789,36 @@ module swion::nft_system {
             is_public: false,
             max_supply: 100,
             current_supply: 1,
-            price: 1000
+            price: 1000,
+            position_x: 0,
+            position_y: 0
         }
+    }
+
+    /// SynObjectの位置を更新する関数
+    public entry fun update_syn_position(
+        tank: &WaterTank,
+        syn: &mut SynObject,
+        new_x: u64,
+        new_y: u64,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        // タンクのオーナーのみが更新可能
+        assert!(sender == tank.owner, 1);
+        syn.position_x = new_x;
+        syn.position_y = new_y;
+        event::emit(UpdateSynPositionEvent {
+            syn_id: object::uid_to_inner(&syn.id),
+            new_x,
+            new_y
+        });
+    }
+
+    /// SynObjectの位置情報を取得する関数
+    #[allow(unused_use)]
+    public fun get_syn_position(syn: &SynObject): (u64, u64) {
+        (syn.position_x, syn.position_y)
     }
 }
 
@@ -660,9 +826,10 @@ module swion::nft_system {
 module swion::nft_systemTests {
     use swion::nft_system::{
         Self, WaterTank, NFTObject, SynObject,
-        initialize_tank, mint_nft_object,
+        initialize_tank, mint_nft_object, mint_syn_object,
         attach_object, update_object_position, update_tank_background,
-        update_tank_level, save_layout
+        update_tank_level, save_layout, attach_syn_object, get_syn_id,
+        update_syn_position, get_syn_position
     };
     use sui::test_scenario as ts;
     use sui::object;
@@ -763,6 +930,178 @@ module swion::nft_systemTests {
             // 返却
             ts::return_to_address(addr1, tank);
             ts::return_to_address(addr1, returned_nft);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_tank_syn_object_workflow() {
+        let addr1 = @0xA;
+        // addr1 を作成者としてシナリオ開始
+        let scenario = ts::begin(addr1);
+        {
+            // 1. ウォータータンクの初期化
+            initialize_tank(
+                addr1,
+                b"https://example.com/bg.png",
+                1,
+                ts::ctx(&mut scenario)
+            );
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 2. SynObject の mint
+            // 空のattached_objectsベクターを作成
+            let attached_objects = vector::empty<object::ID>();
+            
+            mint_syn_object(
+                attached_objects,
+                b"https://example.com/syn.png",
+                100, // max_supply
+                1000, // price
+                ts::ctx(&mut scenario)
+            );
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 送信先アドレス (addr1) の在庫からタンクと SynObject を取得
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let syn = ts::take_from_address<SynObject>(&scenario, addr1);
+
+            // 3. SynObject をウォータータンクに添付
+            attach_syn_object(&mut tank, &syn, ts::ctx(&mut scenario));
+            
+            // タンクにSynObjectのIDが追加されていることを確認
+            let tank_objects = nft_system::get_tank_child_objects(&tank);
+            let syn_id = nft_system::get_syn_id(&syn);
+            
+            // SynObjectのIDがタンクのchild_objectsに含まれていることを確認
+            assert!(vector::contains(tank_objects, &syn_id), 200);
+
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, syn);
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // SBTに紐付いたSynObject情報の取得をテスト
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let syn = ts::take_from_address<SynObject>(&scenario, addr1);
+            
+            // SynObjectをベクターに格納
+            let syns = vector::empty<SynObject>();
+            vector::push_back(&mut syns, syn);
+            
+            // SynCollectionを取得
+            let (collection, returned_syns) = nft_system::get_wallet_syn_collection(&tank, syns);
+            
+            // コレクションのサイズを確認（期待値: 1）
+            let size = nft_system::get_syn_collection_size(&collection);
+            assert!(size == 1, 201);
+            
+            // 最初のSynObjectの情報を取得
+            let syn_info = nft_system::get_syn_info_from_collection(&collection, 0);
+            
+            // SynInfo情報から各値を取得して検証
+            let is_public = nft_system::get_syn_info_is_public(syn_info);
+            let (current_supply, max_supply) = nft_system::get_syn_info_supply(syn_info);
+            let price = nft_system::get_syn_info_price(syn_info);
+            
+            // 値が期待通りか確認
+            assert!(!is_public, 202); // 初期状態ではfalse
+            assert!(current_supply == 1 && max_supply == 100, 203);
+            assert!(price == 1000, 204);
+            
+            // 返された新しいベクターからSynObjectを取り出す
+            assert!(vector::length(&returned_syns) == 1, 205);
+            let returned_syn = vector::pop_back(&mut returned_syns);
+            
+            // 空になったベクターを破棄
+            vector::destroy_empty(returned_syns);
+            
+            // 返却
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, returned_syn);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_syn_object_position() {
+        let addr1 = @0xA;
+        let scenario = ts::begin(addr1);
+        {
+            // 1. ウォータータンクの初期化
+            initialize_tank(
+                addr1,
+                b"https://example.com/bg.png",
+                1,
+                ts::ctx(&mut scenario)
+            );
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // 2. SynObject の mint
+            let attached_objects = vector::empty<object::ID>();
+            
+            mint_syn_object(
+                attached_objects,
+                b"https://example.com/syn.png",
+                100,
+                1000,
+                ts::ctx(&mut scenario)
+            );
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let syn = ts::take_from_address<SynObject>(&scenario, addr1);
+
+            // 3. SynObjectをタンクに添付
+            attach_syn_object(&mut tank, &syn, ts::ctx(&mut scenario));
+            
+            // 4. SynObjectの位置を更新
+            update_syn_position(&tank, &mut syn, 150, 300, ts::ctx(&mut scenario));
+            
+            // 位置が正しく更新されたか確認
+            let (x, y) = nft_system::get_syn_position(&syn);
+            assert!(x == 150 && y == 300, 300);
+
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, syn);
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            let tank = ts::take_from_address<WaterTank>(&scenario, addr1);
+            let syn = ts::take_from_address<SynObject>(&scenario, addr1);
+            
+            // SynObjectをベクターに格納
+            let syns = vector::empty<SynObject>();
+            vector::push_back(&mut syns, syn);
+            
+            // SynCollectionを取得
+            let (collection, returned_syns) = nft_system::get_wallet_syn_collection(&tank, syns);
+            
+            // 最初のSynObjectの情報を取得
+            let syn_info = nft_system::get_syn_info_from_collection(&collection, 0);
+            
+            // 位置情報が正しく含まれているか確認
+            let (info_x, info_y) = nft_system::get_syn_info_position(syn_info);
+            assert!(info_x == 150 && info_y == 300, 301);
+            
+            // 返却処理
+            let returned_syn = vector::pop_back(&mut returned_syns);
+            vector::destroy_empty(returned_syns);
+            
+            ts::return_to_address(addr1, tank);
+            ts::return_to_address(addr1, returned_syn);
         };
 
         ts::end(scenario);
