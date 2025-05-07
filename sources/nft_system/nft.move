@@ -33,6 +33,12 @@ module swion::nft_system_nft {
         new_y: u64
     }
 
+    struct UpdateNFTInfoEvent has copy, drop {
+        nft_id: ID,
+        owner: address,
+        new_name: String
+    }
+
     /// 個々の NFTObject の mint
     public entry fun mint_nft_object(
         name: vector<u8>,
@@ -174,5 +180,28 @@ module swion::nft_system_nft {
 
     public fun get_nft_id(nft: &NFTObject): ID {
         object::uid_to_inner(&nft.id)
+    }
+
+    /// NFTObjectのnameとimageを更新する関数
+    public entry fun update_nft_info(
+        nft: &mut NFTObject,
+        new_name: vector<u8>,
+        new_image: vector<u8>,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        // オーナーのみが更新可能
+        assert!(sender == nft.owner, 3);
+        
+        // 新しい名前とイメージを設定
+        nft.name = string::utf8(new_name);
+        nft.image = url::new_unsafe_from_bytes(new_image);
+        
+        // イベント発行
+        event::emit(UpdateNFTInfoEvent {
+            nft_id: object::uid_to_inner(&nft.id),
+            owner: nft.owner,
+            new_name: nft.name
+        });
     }
 } 

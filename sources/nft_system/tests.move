@@ -6,7 +6,7 @@ module swion::nft_system_tests {
     };
     use swion::nft_system_nft::{
         Self as nft, NFTObject, mint_nft_object, update_object_position,
-        attach_object, save_layout
+        attach_object, save_layout, update_nft_info, get_nft_name, get_nft_image
     };
     use swion::nft_system_syn_object::{
         Self as syn_object, SynObject, mint_syn_object, attach_syn_object,
@@ -15,7 +15,10 @@ module swion::nft_system_tests {
     
     use sui::test_scenario as ts;
     use sui::object;
+    use sui::url;
     use std::vector;
+    use std::string;
+    use std::ascii;
 
     #[test]
     fun test_tank_nft_workflow() {
@@ -214,6 +217,49 @@ module swion::nft_system_tests {
 
             ts::return_to_address(addr1, tank);
             ts::return_to_address(addr1, syn);
+        };
+
+        ts::end(scenario);
+    }
+
+    #[test]
+    fun test_update_nft_info() {
+        let addr1 = @0xA;
+        // addr1 を作成者としてシナリオ開始
+        let scenario = ts::begin(addr1);
+        {
+            // NFTObject の mint
+            nft::mint_nft_object(
+                b"TestNFT",
+                b"https://example.com/nft.png",
+                ts::ctx(&mut scenario)
+            );
+        };
+
+        ts::next_tx(&mut scenario, addr1);
+        {
+            // NFTオブジェクトを取得
+            let nft_obj = ts::take_from_address<nft::NFTObject>(&scenario, addr1);
+            
+            // 名前と画像を更新
+            nft::update_nft_info(
+                &mut nft_obj,
+                b"UpdatedNFT",
+                b"https://example.com/updated.png",
+                ts::ctx(&mut scenario)
+            );
+            
+            // 更新された情報を確認
+            let name = nft::get_nft_name(&nft_obj);
+            let image = nft::get_nft_image(&nft_obj);
+            
+            // 名前が正しく更新されたか確認
+            assert!(*name == std::string::utf8(b"UpdatedNFT"), 401);
+            
+            // 画像URLが正しく更新されたか確認
+            assert!(sui::url::inner_url(image) == std::ascii::string(b"https://example.com/updated.png"), 402);
+            
+            ts::return_to_address(addr1, nft_obj);
         };
 
         ts::end(scenario);
